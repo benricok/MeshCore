@@ -6,43 +6,40 @@
 
 bool DFR1195Display::begin() {
   if (!_isOn) {
-#ifdef PIN_TFT_VDD_CTL
-    pinMode(PIN_TFT_VDD_CTL, OUTPUT);
+    if (PIN_TFT_VDD_CTL != -1) {
+      pinMode(PIN_TFT_VDD_CTL, OUTPUT);
 #ifdef PIN_TFT_VDD_CTL_ACTIVE
-    digitalWrite(PIN_TFT_VDD_CTL, PIN_TFT_VDD_CTL_ACTIVE);
+      digitalWrite(PIN_TFT_VDD_CTL, PIN_TFT_VDD_CTL_ACTIVE);
 #else
-    digitalWrite(PIN_TFT_VDD_CTL, HIGH);
+      digitalWrite(PIN_TFT_VDD_CTL, HIGH);
 #endif
-#endif
+    }
 
-#ifdef PIN_TFT_LEDA_CTL
-    pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
+    if (PIN_TFT_LEDA_CTL != -1) {
+      pinMode(PIN_TFT_LEDA_CTL, OUTPUT);
 #ifdef PIN_TFT_LEDA_CTL_ACTIVE
-    digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
+      digitalWrite(PIN_TFT_LEDA_CTL, PIN_TFT_LEDA_CTL_ACTIVE);
 #else
-    digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
+      digitalWrite(PIN_TFT_LEDA_CTL, HIGH);
 #endif
-#endif
+    }
 
-#ifdef USE_PIN_TFT
-    pinMode(PIN_TFT_CS, OUTPUT);
-    digitalWrite(PIN_TFT_CS, HIGH);
-    displaySPI.begin(PIN_TFT_SCL, -1, PIN_TFT_SDA, PIN_TFT_CS);
-#else
-    displaySPI.begin();
-#endif
+    if (PIN_TFT_RST != -1) {
+      pinMode(PIN_TFT_RST, OUTPUT);
+      digitalWrite(PIN_TFT_RST, HIGH);
+    }
 
-    pinMode(PIN_TFT_RST, OUTPUT);
-    digitalWrite(PIN_TFT_RST, HIGH);
-
-    display.begin(16000000);
+    // Initialize ST7735 160x80
+    display.initR(INITR_MINI160x80_PLUGIN);
     display.setRotation(DISPLAY_ROTATION);
-    display.fillScreen(0x0000);
-    display.setTextColor(0xFFFF);
+    display.setSPISpeed(40000000);
+    display.fillScreen(ST77XX_BLACK);
+    display.setTextColor(ST77XX_WHITE);
     display.setTextSize(2);
 
     _isOn = true;
   }
+
   return true;
 }
 

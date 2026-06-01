@@ -3,21 +3,21 @@
 #include <helpers/ui/DisplayDriver.h>
 #include <Wire.h>
 #include <SPI.h>
-#include <DFRobot_GDL.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
 
 class DFR1195Display : public DisplayDriver {
-  SPIClass displaySPI;
-  DFRobot_ST7735_80x160_HW_SPI display;
+  Adafruit_ST7735 display;
   bool _isOn;
   uint16_t _color;
 
 public:
 #ifdef USE_PIN_TFT
   DFR1195Display() : DisplayDriver(160, 80),
-      display(PIN_TFT_DC, PIN_TFT_CS, PIN_TFT_RST, PIN_TFT_LEDA_CTL, &displaySPI) {
+      display(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_SDA, PIN_TFT_SCL, PIN_TFT_RST) {
 #else
   DFR1195Display() : DisplayDriver(160, 80),
-      display(PIN_TFT_DC, PIN_TFT_CS, PIN_TFT_RST, PIN_TFT_LEDA_CTL, &displaySPI) {
+      display(&SPI1, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST) {
 #endif
     _isOn = false;
   }
