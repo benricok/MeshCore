@@ -1,5 +1,6 @@
 #include "ObserverMQTT.h"
 #include "MyMesh.h"
+#include <base64.hpp>
 
 extern MyMesh the_mesh;
 
@@ -15,8 +16,10 @@ String ObserverMQTT::getTopicPrefix() {
 }
 
 
-ObserverMQTT::ObserverMQTT() : mqttClient(wifiClient) {
-    lastReconnectAttempt = 0;
+ObserverMQTT::ObserverMQTT() : localMqttClient(wifiClient), timeClient(ntpUDP, "pool.ntp.org", 0, 60000) {
+    lastLocalReconnectAttempt = 0;
+    lastMmReconnectAttempt = 0;
+    ntpSynced = false;
 }
 
 void ObserverMQTT::begin() {
@@ -24,13 +27,27 @@ void ObserverMQTT::begin() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-    // Don't block indefinitely here, just start connecting.
-    mqttClient.setServer(MQTT_SERVER, atoi(MQTT_PORT));
-    mqttClient.setBufferSize(2048); // Increase buffer size for large JSON payloads
-    mqttClient.setCallback(ObserverMQTT::mqttCallback);
+    // Local Broker setup
+    localMqttClient.setServer(MQTT_SERVER, atoi(MQTT_PORT));
+    localMqttClient.setBufferSize(2048);
+    localMqttClient.setCallback(ObserverMQTT::mqttCallback);
+    
+    // Start NTP Client
+    timeClient.begin();
+    
+    // MeshMapper WebSockets setup
+    wsClient.beginSSL("mqtt.meshmapper.net", 443, "/mqtt", NULL, "mqtt");
+    wsClient.setReconnectInterval(5000);
+    mmClient.begin(wsClient);
+    mmClient.setTimeout(15000);
+    
+    // Setup MeshMapper callback using lambda
+    mmClient.subscribe([](const String& topic, const String& payload, const size_t size) {
+        observerMQTT.handleMessage((char*)topic.c_str(), (byte*)payload.c_str(), size);
+    });
 }
 
-void ObserverMQTT::reconnect() {
+void ObserverMQTT::reconnectLocal() {
     if (WiFi.status() != WL_CONNECTED) {
         unsigned long now = millis();
         static unsigned long lastWiFiPrint = 0;
@@ -73,16 +90,16 @@ void ObserverMQTT::reconnect() {
         return; // wait for WiFi
     }
 
-    if (!mqttClient.connected()) {
+    if (!localMqttClient.connected()) {
         unsigned long now = millis();
-        if (now - lastReconnectAttempt > 5000) {
-            lastReconnectAttempt = now;
-            Serial.println("Attempting MQTT connection...");
-            Serial.print("MQTT Server: ");
+        if (now - lastLocalReconnectAttempt > 5000) {
+            lastLocalReconnectAttempt = now;
+            Serial.println("[Local Broker] Attempting MQTT connection...");
+            Serial.print("[Local Broker] MQTT Server: ");
             Serial.println(MQTT_SERVER);
-            Serial.print("MQTT Port: ");
+            Serial.print("[Local Broker] MQTT Port: ");
             Serial.println(MQTT_PORT);
-            Serial.print("MQTT User: ");
+            Serial.print("[Local Broker] MQTT User: ");
             Serial.println(MQTT_USER);
             // Serial.print("MQTT PASS: ");
             // Serial.println(MQTT_PASS);
@@ -92,39 +109,135 @@ void ObserverMQTT::reconnect() {
             
             bool connected = false;
             if (strlen(MQTT_USER) > 0) {
-                connected = mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PWD);
+                connected = localMqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PWD);
             } else {
-                connected = mqttClient.connect(clientId.c_str());
+                connected = localMqttClient.connect(clientId.c_str());
             }
             
             if (connected) {
-                Serial.println("MQTT connected successfully!");
+                Serial.println("[Local Broker] MQTT connected successfully!");
                 // Once connected, publish an announcement...
-                mqttClient.publish((getTopicPrefix() + "status").c_str(), "online");
+                localMqttClient.publish((getTopicPrefix() + "status").c_str(), "online");
                 // Subscribe to time endpoints
-                mqttClient.subscribe((getTopicPrefix() + "time/read").c_str());
-                mqttClient.subscribe((getTopicPrefix() + "time/update").c_str());
-                lastReconnectAttempt = 0;
+                localMqttClient.subscribe((getTopicPrefix() + "time/read").c_str());
+                localMqttClient.subscribe((getTopicPrefix() + "time/update").c_str());
+                lastLocalReconnectAttempt = 0;
+    lastMmReconnectAttempt = 0;
             } else {
-                Serial.print("MQTT connection failed, rc=");
-                Serial.println(mqttClient.state());
+                Serial.print("[Local Broker] MQTT connection failed, rc=");
+                Serial.println(localMqttClient.state());
             }
         }
     }
 }
 
-void ObserverMQTT::loop() {
-    if (!mqttClient.connected()) {
-        reconnect();
-    } else {
-        mqttClient.loop();
+void ObserverMQTT::reconnectMeshMapper() {
+    if (!mmClient.isConnected()) {
+        // Wait at least 2 seconds after boot for network to settle
+        if (millis() < 2000) return;
+
+        unsigned long now = millis();
+        if (now - lastMmReconnectAttempt > 5000) {
+            lastMmReconnectAttempt = now;
+            Serial.println("[MeshMapper] Attempting WSS MQTT connection...");
+            
+            IPAddress mmIP;
+            if (WiFi.hostByName("mqtt.meshmapper.net", mmIP)) {
+                Serial.print("[MeshMapper] Resolved mqtt.meshmapper.net to IP: ");
+                Serial.println(mmIP);
+            } else {
+                Serial.println("[MeshMapper] DNS resolution failed for mqtt.meshmapper.net!");
+            }
+            
+            String clientId = "MeshcoreRepeater-";
+            clientId += String(random(0xffff), HEX);
+            
+            // Generate fresh token
+            String token = generateMeshMapperToken();
+            
+            // Username must be v1_<PUBLIC_KEY>
+            String pubkey = "";
+            for (int i = 0; i < PUB_KEY_SIZE; i++) {
+                if (the_mesh.self_id.pub_key[i] < 16) pubkey += "0";
+                pubkey += String(the_mesh.self_id.pub_key[i], HEX);
+            }
+            pubkey.toUpperCase();
+            String mqttUsername = "v1_" + pubkey;
+            
+            Serial.println("[MeshMapper JWT] Username: " + mqttUsername);
+            Serial.println("[MeshMapper JWT] Token Length: " + String(token.length()));
+            Serial.println("[MeshMapper JWT] Token: " + token);
+            
+            if (mmClient.connect(clientId.c_str(), mqttUsername.c_str(), token.c_str())) {
+                Serial.println("[MeshMapper] MQTT connected successfully!");
+                // No MeshMapper subscriptions needed (MeshMapper is receive-only for packets, status, adverts)
+                lastMmReconnectAttempt = 0;
+            } else {
+                Serial.print("[MeshMapper] MQTT connection failed (lwmqtt_err=");
+                Serial.print((int)mmClient.getLastError());
+                Serial.print(", return_code=");
+                Serial.print((int)mmClient.getReturnCode());
+                Serial.println(")");
+            }
+        }
     }
 }
+void ObserverMQTT::loop() {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (!ntpSynced) {
+            bool success = timeClient.update();
+            if (success && timeClient.getEpochTime() > 1700000000) {
+                ntpSynced = true;
+                unsigned long epoch = timeClient.getEpochTime();
+                the_mesh.getRTCClock()->setCurrentTime(epoch);
+                
+                IPAddress ntpIP;
+                if (WiFi.hostByName("pool.ntp.org", ntpIP)) {
+                    Serial.print("[NTPClient] pool.ntp.org resolved to: ");
+                    Serial.println(ntpIP);
+                }
+                Serial.print("[NTPClient] Synced local RTC to: ");
+                Serial.println(epoch);
+            } else {
+                static unsigned long lastNtpPrint = 0;
+                if (millis() - lastNtpPrint > 5000) {
+                    Serial.println("[NTPClient] Waiting for NTP sync from pool.ntp.org...");
+                    lastNtpPrint = millis();
+                }
+            }
+        }
 
+        if (!localMqttClient.connected()) {
+            reconnectLocal();
+        } else {
+            localMqttClient.loop();
+        }
+    }
+    
+    wsClient.loop();
+    mmClient.update();
+    reconnectMeshMapper();
+}
 
-
+void ObserverMQTT::publishToBoth(const String& topic, const String& payload) {
+    if (localMqttClient.connected()) {
+        if (localMqttClient.publish(topic.c_str(), payload.c_str())) {
+            Serial.println("[Local Broker] Published to " + topic);
+        } else {
+            Serial.println("[Local Broker] Failed to publish to " + topic);
+        }
+    }
+    
+    if (mmClient.isConnected()) {
+        if (mmClient.publish(topic.c_str(), payload.c_str())) {
+            Serial.println("[MeshMapper] Published to " + topic);
+        } else {
+            Serial.println("[MeshMapper] Failed to publish to " + topic);
+        }
+    }
+}
 void ObserverMQTT::publishPacket(const uint8_t* payload, size_t len, int rssi, float snr) {
-    if (mqttClient.connected()) {
+    if (localMqttClient.connected()) {
         JsonDocument doc;
         
         // Add origin id for observer format
@@ -213,17 +326,14 @@ void ObserverMQTT::publishPacket(const uint8_t* payload, size_t len, int rssi, f
         
         // Publish to observer topic
         String observerTopic = getTopicPrefix() + "packets";
-        if (!mqttClient.publish(observerTopic.c_str(), out.c_str())) {
-            Serial.print("Failed to publish observer packet! Size: ");
-            Serial.println(out.length());
-        }
+        publishToBoth(observerTopic, out);
     }
 }
 
 
 
 void ObserverMQTT::publishConfig(const void* prefsPtr) {
-    if (mqttClient.connected() && prefsPtr != nullptr) {
+    if (localMqttClient.connected() && prefsPtr != nullptr) {
         const NodePrefs* prefs = (const NodePrefs*)prefsPtr;
         JsonDocument doc;
         String pubkey = "";
@@ -253,15 +363,18 @@ void ObserverMQTT::publishConfig(const void* prefsPtr) {
         String out;
         serializeJson(doc, out);
         String topic = getTopicPrefix() + "config";
-        if (!mqttClient.publish(topic.c_str(), out.c_str())) {
-            Serial.print("Failed to publish config! Size: ");
-            Serial.println(out.length());
+        if (localMqttClient.connected()) {
+            if (localMqttClient.publish(topic.c_str(), out.c_str())) {
+                Serial.println("[Local Broker] Published to " + topic);
+            } else {
+                Serial.println("[Local Broker] Failed to publish to " + topic);
+            }
         }
     }
 }
 
 void ObserverMQTT::publishNeighbors(const void* neighboursPtr, int max_neighbours) {
-    if (mqttClient.connected() && neighboursPtr != nullptr) {
+    if (localMqttClient.connected() && neighboursPtr != nullptr) {
         struct DummyNeighbour {
             uint8_t pub_key[6];
             uint32_t advert_timestamp;
@@ -298,15 +411,81 @@ void ObserverMQTT::publishNeighbors(const void* neighboursPtr, int max_neighbour
         String out;
         serializeJson(doc, out);
         String topic = getTopicPrefix() + "neighbors";
-        if (!mqttClient.publish(topic.c_str(), out.c_str())) {
-            Serial.print("Failed to publish neighbors! Size: ");
-            Serial.println(out.length());
+        if (localMqttClient.connected()) {
+            if (localMqttClient.publish(topic.c_str(), out.c_str())) {
+                Serial.println("[Local Broker] Published to " + topic);
+            } else {
+                Serial.println("[Local Broker] Failed to publish to " + topic);
+            }
         }
     }
 }
 
 void ObserverMQTT::mqttCallback(char* topic, byte* payload, unsigned int length) {
     observerMQTT.handleMessage(topic, payload, length);
+}
+
+// Helper function for base64url encoding
+static String base64urlEncode(const String& input) {
+    int inputLen = input.length();
+    int encodedLen = encode_base64_length(inputLen);
+    char* encoded = (char*)malloc(encodedLen + 1);
+    encode_base64((const unsigned char*)input.c_str(), inputLen, (unsigned char*)encoded);
+    encoded[encodedLen] = '\0';
+    
+    String out = encoded;
+    free(encoded);
+    
+    out.replace("+", "-");
+    out.replace("/", "_");
+    out.replace("=", "");
+    return out;
+}
+
+String ObserverMQTT::generateMeshMapperToken() {
+    // Header
+    String header = "{\"alg\":\"Ed25519\",\"typ\":\"JWT\"}";
+    
+    // Payload
+    uint32_t now = the_mesh.getRTCClock()->getCurrentTime();
+    uint32_t exp = now + 3600; // 1 hour expiration
+    
+    String pubkey = "";
+    for (int i = 0; i < PUB_KEY_SIZE; i++) {
+        if (the_mesh.self_id.pub_key[i] < 16) pubkey += "0";
+        pubkey += String(the_mesh.self_id.pub_key[i], HEX);
+    }
+    pubkey.toUpperCase();
+    
+    String payload;
+    if (now > 1700000000) {
+        payload = "{\"publicKey\":\"" + pubkey + "\",\"iat\":" + String(now) + ",\"exp\":" + String(exp) + ",\"aud\":\"mqtt.meshmapper.net\"}";
+    } else {
+        payload = "{\"publicKey\":\"" + pubkey + "\",\"aud\":\"mqtt.meshmapper.net\"}";
+    }
+    
+    Serial.println("[MeshMapper JWT] Header: " + header);
+    Serial.println("[MeshMapper JWT] Payload: " + payload);
+    
+    // Encode
+    String headerB64 = base64urlEncode(header);
+    String payloadB64 = base64urlEncode(payload);
+    
+    String signingInput = headerB64 + "." + payloadB64;
+    
+    // Sign
+    uint8_t sig[SIGNATURE_SIZE];
+    the_mesh.self_id.sign(sig, (const uint8_t*)signingInput.c_str(), signingInput.length());
+    
+    // Hex encode signature
+    String sigHex = "";
+    for (int i = 0; i < SIGNATURE_SIZE; i++) {
+        if (sig[i] < 16) sigHex += "0";
+        sigHex += String(sig[i], HEX);
+    }
+    sigHex.toUpperCase();
+    
+    return signingInput + "." + sigHex;
 }
 
 void ObserverMQTT::handleMessage(char* topic, byte* payload, unsigned int length) {
@@ -326,9 +505,16 @@ void ObserverMQTT::handleMessage(char* topic, byte* payload, unsigned int length
         
         String out;
         serializeJson(doc, out);
-        mqttClient.publish((getTopicPrefix() + "time/current").c_str(), out.c_str());
-        Serial.print("Published current RTC time: ");
-        Serial.println(rtc_now);
+        String topic = getTopicPrefix() + "time/current";
+        if (localMqttClient.connected()) {
+            if (localMqttClient.publish(topic.c_str(), out.c_str())) {
+                Serial.println("[Local Broker] Published to " + topic);
+            } else {
+                Serial.println("[Local Broker] Failed to publish to " + topic);
+            }
+        }
+        Serial.println("[Local Broker] Published current RTC time: ");
+        Serial.print(rtc_now);
     } 
     else if (topicStr == getTopicPrefix() + "time/update") {
         String payloadStr = "";
@@ -357,9 +543,12 @@ void ObserverMQTT::handleMessage(char* topic, byte* payload, unsigned int length
             
             String out;
             serializeJson(doc, out);
-            mqttClient.publish((getTopicPrefix() + "time/current").c_str(), out.c_str());
+            String topic = getTopicPrefix() + "time/current";
+            if (localMqttClient.connected()) {
+                localMqttClient.publish(topic.c_str(), out.c_str());
+            }
         } else {
-            Serial.println("Invalid time payload received via MQTT");
+            Serial.println("[Local Broker] Invalid time payload received via MQTT");
         }
     }
 }
@@ -368,7 +557,7 @@ void ObserverMQTT::handleMessage(char* topic, byte* payload, unsigned int length
 #include "../../src/helpers/AdvertDataHelpers.h"
 
 void ObserverMQTT::publishAdvert(const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len, int rssi, float snr) {
-    if (!mqttClient.connected()) return;
+    if (!localMqttClient.connected()) return;
     
     AdvertDataParser parser(app_data, app_data_len);
     if (!parser.isValid()) return;
@@ -414,12 +603,12 @@ void ObserverMQTT::publishAdvert(const mesh::Identity& id, uint32_t timestamp, c
     serializeJson(doc, out);
     
     String observerTopic = getTopicPrefix() + "adverts";
-    mqttClient.publish(observerTopic.c_str(), out.c_str());
+    publishToBoth(observerTopic, out);
 }
 
 
 void ObserverMQTT::publishStatus(uint32_t uptime_secs, int wifi_rssi, uint32_t free_heap, uint32_t rx_count, uint32_t tx_count, const uint8_t* telemetry_buf, size_t telemetry_len) {
-    if (!mqttClient.connected()) return;
+    if (!localMqttClient.connected()) return;
     
     JsonDocument doc;
     String pubkey = "";
@@ -466,5 +655,5 @@ void ObserverMQTT::publishStatus(uint32_t uptime_secs, int wifi_rssi, uint32_t f
     serializeJson(doc, out);
     
     String observerTopic = getTopicPrefix() + "status";
-    mqttClient.publish(observerTopic.c_str(), out.c_str());
+    publishToBoth(observerTopic, out);
 }

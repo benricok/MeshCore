@@ -1,6 +1,7 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
 #include <CayenneLPP.h>
+#include <WiFi.h>
 
 #include "MyMesh.h"
 #include "ObserverMQTT.h"
