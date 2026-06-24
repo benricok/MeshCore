@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
+#include <Identity.h>
 
 #ifndef WIFI_SSID
 #define WIFI_SSID "YourSSID"
@@ -29,17 +30,20 @@
 #define MQTT_PWD ""
 #endif
 
-class MQTTBacklink {
+#ifndef OBSERVER_IATA
+#define OBSERVER_IATA "XXX"
+#endif
+
+class ObserverMQTT {
 public:
-    MQTTBacklink();
+    ObserverMQTT();
     void begin();
     void loop();
-
-    void publishTelemetry(const String& data);
     void publishPacket(const uint8_t* payload, size_t len, int rssi, float snr);
-    void publishStats(uint32_t rxCount, uint32_t txCount);
+    void publishAdvert(const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len, int rssi, float snr);
     void publishConfig(const void* prefsPtr); // Accepts void* to avoid circular header deps
     void publishNeighbors(const void* neighboursPtr, int max_neighbours);
+    void publishStatus(uint32_t uptime_secs, int wifi_rssi, uint32_t free_heap, uint32_t rx_count, uint32_t tx_count, const uint8_t* telemetry_buf, size_t telemetry_len);
 
 private:
     void reconnect();
@@ -47,9 +51,11 @@ private:
     static void mqttCallback(char* topic, byte* payload, unsigned int length);
     void handleMessage(char* topic, byte* payload, unsigned int length);
     
+    String getTopicPrefix();
+    
     WiFiClient wifiClient;
     PubSubClient mqttClient;
     unsigned long lastReconnectAttempt;
 };
 
-extern MQTTBacklink mqttBacklink;
+extern ObserverMQTT observerMQTT;

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <Mesh.h>
 #include <RTClib.h>
+#include "ObserverMQTT.h"
 #include <target.h>
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
@@ -76,7 +77,7 @@ struct NeighbourInfo {
   #define FIRMWARE_VERSION   "v1.15.0"
 #endif
 
-#define FIRMWARE_ROLE "repeater"
+#define FIRMWARE_ROLE            "observer_repeater"
 
 #define PACKET_LOG_FILE  "/packet_log"
 

@@ -1,6 +1,6 @@
 #include "MyMesh.h"
 #include <algorithm>
-#include "MQTTBacklink.h"
+#include "ObserverMQTT.h"
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -92,7 +92,7 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
   neighbour->snr = (int8_t)(snr * 4);
   
   if (is_new || abs(old_snr - neighbour->snr) > 8) { // publish on new neighbor or if SNR changes by > 2.0
-      mqttBacklink.publishNeighbors(neighbours, MAX_NEIGHBOURS);
+      observerMQTT.publishNeighbors(neighbours, MAX_NEIGHBOURS);
   }
 #endif
 }
@@ -477,12 +477,12 @@ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
   Serial.println();
 #endif
 
-  mqttBacklink.publishPacket(raw, len, (int)rssi, snr);
+  observerMQTT.publishPacket(raw, len, (int)rssi, snr);
 }
 
 void MyMesh::savePrefs() {
   _cli.savePrefs(_fs);
-  mqttBacklink.publishConfig(&_prefs);
+  observerMQTT.publishConfig(&_prefs);
 }
 
 void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
@@ -650,6 +650,9 @@ static bool isShare(const mesh::Packet *packet) {
 void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32_t timestamp,
                           const uint8_t *app_data, size_t app_data_len) {
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
+
+  // Publish advert to observer MQTT
+  observerMQTT.publishAdvert(id, timestamp, app_data, app_data_len, (int)_radio->getLastRSSI(), packet->getSNR());
 
   // if this a zero hop advert (and not via 'Share'), add it to neighbours
   if (packet->path_len == 0 && !isShare(packet)) {

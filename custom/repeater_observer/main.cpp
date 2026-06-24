@@ -3,7 +3,7 @@
 #include <CayenneLPP.h>
 
 #include "MyMesh.h"
-#include "MQTTBacklink.h"
+#include "ObserverMQTT.h"
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -42,7 +42,7 @@ void setup() {
   delay(5000);
 #endif
 
-  mqttBacklink.begin();
+  observerMQTT.begin();
 
   // For power saving
   lastActive = millis(); // mark last active time since boot
@@ -153,47 +153,24 @@ void loop() {
 
   the_mesh.loop();
   sensors.loop();
-  mqttBacklink.loop();
+  observerMQTT.loop();
 
-  static unsigned long lastStatsPublish = 0;
-  if (millis() - lastStatsPublish > 60000) { // Every 60s
-      lastStatsPublish = millis();
+  
+  static unsigned long lastObserverStatus = 0;
+  if (millis() - lastObserverStatus > 60000) { // Every 60s
+      lastObserverStatus = millis();
       uint32_t rxTotal = the_mesh.getNumRecvFlood() + the_mesh.getNumRecvDirect();
       uint32_t txTotal = the_mesh.getNumSentFlood() + the_mesh.getNumSentDirect();
-      mqttBacklink.publishStats(rxTotal, txTotal);
+      uint32_t uptime = millis() / 1000;
+      int wifiRssi = WiFi.RSSI();
+      uint32_t freeHeap = rp2040.getFreeHeap();
       
       CayenneLPP telemetry(128);
       telemetry.reset();
       telemetry.addVoltage(1, (float)board.getBattMilliVolts() / 1000.0f);
       sensors.querySensors(0xFF, telemetry);
       
-      JsonDocument doc;
-      uint8_t* buf = telemetry.getBuffer();
-      for (size_t i = 0; i < telemetry.getSize(); ) {
-          uint8_t channel = buf[i++];
-          uint8_t type = buf[i++];
-          if (type == 116) { // Voltage
-              uint16_t val = (buf[i] << 8) | buf[i+1];
-              doc["voltage_" + String(channel)] = val / 100.0;
-              i += 2;
-          } else if (type == 103) { // Temp
-              int16_t val = (buf[i] << 8) | buf[i+1];
-              doc["temp_" + String(channel)] = val / 10.0;
-              i += 2;
-          } else if (type == 104) { // Humidity
-              uint8_t val = buf[i++];
-              doc["humidity_" + String(channel)] = val * 0.5;
-          } else if (type == 115) { // Baro
-              uint16_t val = (buf[i] << 8) | buf[i+1];
-              doc["baro_" + String(channel)] = val / 10.0;
-              i += 2;
-          } else {
-              break;
-          }
-      }
-      String jsonOut;
-      serializeJson(doc, jsonOut);
-      mqttBacklink.publishTelemetry(jsonOut);
+      observerMQTT.publishStatus(uptime, wifiRssi, freeHeap, rxTotal, txTotal, telemetry.getBuffer(), telemetry.getSize());
   }
 
 #ifdef DISPLAY_CLASS
